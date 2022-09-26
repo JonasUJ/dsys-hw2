@@ -1,24 +1,24 @@
 syntax = "proto3";
 
-package main;
+package tcp;
 
-option go_package = "https://github.com/JonasUJ/dsys-hw2;main";
+option go_package = "https://github.com/JonasUJ/dsys-hw2;tcp";
 
 service Tcp {
-    rpc SendPacket (Packet) returns (Empty) {}
-    rpc RecvPacket (Empty) returns (Packet) {}
+    rpc Connect (stream Packet) returns (stream Packet);
 }
 
-message Empty {}
-
-enum Type {
-    SYN = 0;
-    ACK = 1;
-    SYNACK = 2;
+enum Flag {
+    NONE = 0;
+    SYN = 1;
+    ACK = 2;
+    SYNACK = 3;
+    FIN = 4;
 }
 
 message Packet {
-    Type type = 1;
+    Flag flag = 1;
     uint32 seq = 2;
-    string data = 3;
+    uint32 ack = 3;
+    string data = 4;
 }

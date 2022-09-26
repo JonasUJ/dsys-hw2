@@ -4,7 +4,7 @@
 // - protoc             v3.21.6
 // source: tcp/tcp.proto
 
-package main
+package tcp
 
 import (
 	context "context"
@@ -22,8 +22,7 @@ const _ = grpc.SupportPackageIsVersion7
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type TcpClient interface {
-	SendPacket(ctx context.Context, in *Packet, opts ...grpc.CallOption) (*Empty, error)
-	RecvPacket(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Packet, error)
+	Connect(ctx context.Context, opts ...grpc.CallOption) (Tcp_ConnectClient, error)
 }
 
 type tcpClient struct {
@@ -34,30 +33,42 @@ func NewTcpClient(cc grpc.ClientConnInterface) TcpClient {
 	return &tcpClient{cc}
 }
 
-func (c *tcpClient) SendPacket(ctx context.Context, in *Packet, opts ...grpc.CallOption) (*Empty, error) {
-	out := new(Empty)
-	err := c.cc.Invoke(ctx, "/main.Tcp/SendPacket", in, out, opts...)
+func (c *tcpClient) Connect(ctx context.Context, opts ...grpc.CallOption) (Tcp_ConnectClient, error) {
+	stream, err := c.cc.NewStream(ctx, &Tcp_ServiceDesc.Streams[0], "/tcp.Tcp/Connect", opts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &tcpConnectClient{stream}
+	return x, nil
 }
 
-func (c *tcpClient) RecvPacket(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Packet, error) {
-	out := new(Packet)
-	err := c.cc.Invoke(ctx, "/main.Tcp/RecvPacket", in, out, opts...)
-	if err != nil {
+type Tcp_ConnectClient interface {
+	Send(*Packet) error
+	Recv() (*Packet, error)
+	grpc.ClientStream
+}
+
+type tcpConnectClient struct {
+	grpc.ClientStream
+}
+
+func (x *tcpConnectClient) Send(m *Packet) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *tcpConnectClient) Recv() (*Packet, error) {
+	m := new(Packet)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return m, nil
 }
 
 // TcpServer is the server API for Tcp service.
 // All implementations must embed UnimplementedTcpServer
 // for forward compatibility
 type TcpServer interface {
-	SendPacket(context.Context, *Packet) (*Empty, error)
-	RecvPacket(context.Context, *Empty) (*Packet, error)
+	Connect(Tcp_ConnectServer) error
 	mustEmbedUnimplementedTcpServer()
 }
 
@@ -65,11 +76,8 @@ type TcpServer interface {
 type UnimplementedTcpServer struct {
 }
 
-func (UnimplementedTcpServer) SendPacket(context.Context, *Packet) (*Empty, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SendPacket not implemented")
-}
-func (UnimplementedTcpServer) RecvPacket(context.Context, *Empty) (*Packet, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method RecvPacket not implemented")
+func (UnimplementedTcpServer) Connect(Tcp_ConnectServer) error {
+	return status.Errorf(codes.Unimplemented, "method Connect not implemented")
 }
 func (UnimplementedTcpServer) mustEmbedUnimplementedTcpServer() {}
 
@@ -84,58 +92,46 @@ func RegisterTcpServer(s grpc.ServiceRegistrar, srv TcpServer) {
 	s.RegisterService(&Tcp_ServiceDesc, srv)
 }
 
-func _Tcp_SendPacket_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Packet)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TcpServer).SendPacket(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: "/main.Tcp/SendPacket",
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TcpServer).SendPacket(ctx, req.(*Packet))
-	}
-	return interceptor(ctx, in, info, handler)
+func _Tcp_Connect_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(TcpServer).Connect(&tcpConnectServer{stream})
 }
 
-func _Tcp_RecvPacket_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Empty)
-	if err := dec(in); err != nil {
+type Tcp_ConnectServer interface {
+	Send(*Packet) error
+	Recv() (*Packet, error)
+	grpc.ServerStream
+}
+
+type tcpConnectServer struct {
+	grpc.ServerStream
+}
+
+func (x *tcpConnectServer) Send(m *Packet) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *tcpConnectServer) Recv() (*Packet, error) {
+	m := new(Packet)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
-	if interceptor == nil {
-		return srv.(TcpServer).RecvPacket(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: "/main.Tcp/RecvPacket",
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TcpServer).RecvPacket(ctx, req.(*Empty))
-	}
-	return interceptor(ctx, in, info, handler)
+	return m, nil
 }
 
 // Tcp_ServiceDesc is the grpc.ServiceDesc for Tcp service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Tcp_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "main.Tcp",
+	ServiceName: "tcp.Tcp",
 	HandlerType: (*TcpServer)(nil),
-	Methods: []grpc.MethodDesc{
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "SendPacket",
-			Handler:    _Tcp_SendPacket_Handler,
-		},
-		{
-			MethodName: "RecvPacket",
-			Handler:    _Tcp_RecvPacket_Handler,
+			StreamName:    "Connect",
+			Handler:       _Tcp_Connect_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "tcp/tcp.proto",
 }
