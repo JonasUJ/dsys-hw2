@@ -69,7 +69,7 @@ func NewPeer(stream Stream, state State, server *Server) *Peer {
 	return &Peer{
 		stream:  stream,
 		state:   state,
-		name:    "[unknown]",
+		name:    "<unknown>",
 		server:  server,
 		unacked: make(map[uint32]Retransmit),
 		packets: make(chan *tcp.Packet),
@@ -153,7 +153,7 @@ func (peer *Peer) Send(packet *tcp.Packet) {
 
 		// Chance of packet loss
 		if rand.Intn(4) != 0 {
-			log.Printf("sending packet %+v to %s\n", packet, peer.name)
+			log.Printf("[SEND] %s -> %s (%+v)\n", *name, peer.name, packet)
 
 			// Pretend delay on the wire
 			// This also simulates reordering if we send multiple packets quickly
@@ -161,7 +161,7 @@ func (peer *Peer) Send(packet *tcp.Packet) {
 
 			peer.stream.Send(packet)
 		} else {
-			log.Printf("simulated packet loss for %+v to %s\n", packet, peer.name)
+			log.Printf("[SEND (lost)] %s -> %s (%+v)\n", *name, peer.name, packet)
 		}
 	}()
 }
@@ -184,7 +184,7 @@ func (peer *Peer) Recv(chExit, chExited chan struct{}) {
 		default:
 		}
 
-		log.Printf("received packet %+v from %s\n", packet, peer.name)
+		log.Printf("[RECV] %s -> %s (%+v)\n", peer.name, *name, packet)
 
 		peer.mu.Lock()
 		if _, ok := peer.unacked[packet.Ack]; ok {

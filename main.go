@@ -14,13 +14,14 @@ import (
 )
 
 var (
-	name    = flag.String("name", "[no name]", "Name of this instance")
+	name    = flag.String("name", "<no name>", "Name of this instance")
 	port    = flag.Int("port", 50050, "Port to listen on")
 	logfile = flag.String("logfile", "stdout", "Log file")
 )
 
 func main() {
 	flag.Parse()
+	log.SetFlags(log.Ltime)
 
 	if *logfile != "stdout" {
 		file, err := os.OpenFile(*logfile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
