@@ -29,6 +29,7 @@ The program accepts a `-logfile` parameter, which is a file where all logs are w
 ## Q&A
 
 1. What are packages in your implementation? What data structure do you use to transmit data and meta-data?
+
 We assume that by packages the question means packets.
 Packets in our implementation is a struct, and is defined as a message in [tcp.proto](https://github.com/JonasUJ/dsys-hw2/blob/main/tcp/tcp.proto#L19-L24). It has the following declaration (which protoc transforms into a go struct with the same fields).
 ```cs
