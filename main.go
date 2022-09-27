@@ -80,6 +80,7 @@ type Peer struct {
 	stream  Stream
 	state   State
 	seq     uint32
+	ack     uint32
 	name    string
 	server  *Server
 	mu      sync.Mutex // protects unacked
@@ -101,11 +102,24 @@ func NewPeer(stream Stream, state State, server *Server) *Peer {
 }
 
 func (peer *Peer) Format() string {
-	return fmt.Sprintf("name:%s state:%d seq:%d unacked:%d",
+	return fmt.Sprintf("name:%s state:%d seq:%d ack:%d unacked:%d",
 		peer.name,
 		peer.state,
 		peer.seq,
+		peer.ack,
 		len(peer.unacked))
+}
+
+func (peer *Peer) LowestUnacked() uint32 {
+	// Choose high initial min (unlikely that a packet will have this number)
+	var min uint32 = 1 << 31
+	for k := range peer.unacked {
+		if k < min {
+			min = k
+		}
+	}
+
+	return min
 }
 
 func (peer *Peer) RetransmitLoop(chExit chan struct{}) {
@@ -123,19 +137,11 @@ func (peer *Peer) RetransmitLoop(chExit chan struct{}) {
 			continue
 		}
 
-		// Choose high initial min (unlikely that a packet will have this number)
-		var min uint32 = 1 << 31
-		for k := range peer.unacked {
-			if k < min {
-				min = k
-			}
-		}
-
 		// Retransmit the packet if enough time has passed
-		retransmit := peer.unacked[min]
+		retransmit := peer.unacked[peer.LowestUnacked()]
 		now := time.Now().UnixMilli()
-		if retransmit.when > now {
-			log.Printf("retransmitting lowest unacked packet %+v to %s", retransmit.packet, peer.name)
+		if retransmit.when < now {
+			log.Printf("retransmission available for packet %+v to %s", retransmit.packet, peer.name)
 			peer.Send(retransmit.packet)
 		}
 	}
@@ -145,8 +151,7 @@ func (peer *Peer) Send(packet *tcp.Packet) {
 	go func() {
 		// Keep track of when packet is acked
 		if packet.Flag != tcp.Flag_ACK {
-			length := PacketLen(packet)
-			expected := packet.Seq + length
+			expected := packet.Seq + PacketLen(packet)
 
 			log.Printf("expecting ack %d from %s", expected, peer.name)
 
@@ -157,18 +162,27 @@ func (peer *Peer) Send(packet *tcp.Packet) {
 			}
 			peer.mu.Unlock()
 
-			if len(peer.unacked) > 1 {
+			if expected != peer.LowestUnacked() {
 				log.Printf("there exists unacked packets to %s, withholding %+v for now", peer.name, packet)
 				return
 			}
 		}
 
+		// Remember how much we've acked
+		if peer.ack < packet.Ack &&
+			(packet.Flag == tcp.Flag_ACK ||
+				packet.Flag == tcp.Flag_SYNACK) {
+			peer.ack = packet.Ack
+		}
+
 		// Chance of packet loss
 		if rand.Intn(3) != 0 {
 			log.Printf("sending packet %+v to %s\n", packet, peer.name)
+
 			// Pretend delay on the wire
 			// This also simulates reordering if we send multiple packets quickly
-			//time.Sleep(time.Second * time.Duration(rand.Int31n(3)))
+			time.Sleep(time.Second * time.Duration(rand.Int31n(3)))
+
 			peer.stream.Send(packet)
 		} else {
 			log.Printf("simulated packet loss for %+v to %s\n", packet, peer.name)
@@ -187,14 +201,14 @@ func (peer *Peer) Recv(chExit chan struct{}) {
 
 		log.Printf("received packet %+v from %s\n", packet, peer.name)
 
+		peer.mu.Lock()
 		if _, ok := peer.unacked[packet.Ack]; ok {
 			// Packet was acked, no longer any need to save for retransmission
 			log.Printf("%d was acked by %s\n", packet.Ack, peer.name)
 
-			peer.mu.Lock()
 			delete(peer.unacked, packet.Ack)
-			peer.mu.Unlock()
 		}
+		peer.mu.Unlock()
 
 		peer.packets <- packet
 	}
@@ -233,7 +247,7 @@ func (peer *Peer) Run() {
 				peer.Send(&tcp.Packet{
 					Flag: tcp.Flag_SYNACK,
 					Seq:  peer.seq,
-					Ack:  packet.Seq + 1,
+					Ack:  packet.Seq + PacketLen(packet),
 					Data: *name,
 				})
 
@@ -251,7 +265,7 @@ func (peer *Peer) Run() {
 				peer.Send(&tcp.Packet{
 					Flag: tcp.Flag_ACK,
 					Seq:  peer.seq,
-					Ack:  packet.Seq + 1,
+					Ack:  packet.Seq + PacketLen(packet),
 				})
 
 				log.Printf("successfully handshaked with %s\n", peer.name)
@@ -277,10 +291,16 @@ func (peer *Peer) Run() {
 			// select on three channels. We want to handle packets and user input, and not block either
 			select {
 			case packet := <-peer.packets:
-				if packet.Flag == tcp.Flag_NONE {
-					fmt.Printf("%s> %s\n", peer.name, packet.Data)
-				} else if packet.Flag == tcp.Flag_FIN {
-					// TODO
+				// Check if to make sure we haven't already received and acked this. We don't want
+				// to Printf more than once. If we have, then our ack must have been lost.
+				if peer.ack <= packet.Seq {
+					if packet.Flag == tcp.Flag_NONE {
+						fmt.Printf("%s> %s\n", peer.name, packet.Data)
+					} else if packet.Flag == tcp.Flag_FIN {
+						// TODO
+					}
+				} else {
+					log.Printf("got packet that has already been acked (%d > %d)", peer.ack, packet.Seq)
 				}
 
 				// Ack the packet
@@ -290,8 +310,6 @@ func (peer *Peer) Run() {
 						Seq:  peer.seq,
 						Ack:  packet.Seq + PacketLen(packet),
 					})
-				} else {
-					peer.seq += PacketLen(packet)
 				}
 			case msg := <-peer.msgs:
 				switch msg.msgType {
@@ -301,6 +319,7 @@ func (peer *Peer) Run() {
 						Seq:  peer.seq,
 						Data: msg.data,
 					})
+					peer.seq += Len(msg.data)
 				}
 			case <-chRecv: // If grpc dies
 				peer.state = Closed
