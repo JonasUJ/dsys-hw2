@@ -41,13 +41,17 @@ message Packet {
 ```
 
 2. Does your implementation use threads or processes? Why is it not realistic to use threads?
+
 Our implementation uses threads and processes, our threads, however, are not used for simulating TCP. One thing that makes threads unrealistic is that they share memory, while processes do not (unless we do some funky stuff).
 
 3. How do you handle message re-ordering?
+
 We use sequence numbers to keep track of our packets and compare them to ACKs. If we receive an out-of-order packet we discard it and rely on the other party to retransmit it, upon not receiving an ACK for it within a reasonable timeframe.
 
 4. How do you handle message loss?
+
 We handle message loss by checking every second if there is a packet that we should retransmit, in case we haven't received an ackownledgement for that packet yet.
 
 5. Why is the 3-way handshake important?
+
 We agree on a sequence number with the other party, which is needed for further communication. This number is especially important as is evident from our answers above.
