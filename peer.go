@@ -13,23 +13,6 @@ import (
 	"time"
 )
 
-type State uint8
-
-const (
-	New State = iota // Start at New instead of Closed just to be able to differentiate them
-	Listen
-	SynSent
-	SynRecv
-	Established
-	CloseWait
-	LastAck
-	TimeWait
-	FinWait1
-	FinWait2
-	Closing
-	Closed
-)
-
 type MessageType uint8
 
 const (
@@ -84,6 +67,11 @@ func (peer *Peer) String() string {
 		peer.seq,
 		peer.ack,
 		len(peer.unacked))
+}
+
+func (peer *Peer) SetState(state State) {
+	log.Printf("TCP transition for %s (%s -> %s)", peer.name, peer.state, state)
+	peer.state = state
 }
 
 func (peer *Peer) LowestUnacked() uint32 {
@@ -219,7 +207,7 @@ func (peer *Peer) Run() {
 				Seq:  peer.seq,
 				Data: *name,
 			})
-			peer.state = SynSent
+			peer.SetState(SynSent)
 
 		// We're waiting for someone to send a syn, and then go to SynRecv
 		case Listen:
@@ -237,7 +225,7 @@ func (peer *Peer) Run() {
 					Data: *name,
 				})
 
-				peer.state = SynRecv
+				peer.SetState(SynRecv)
 			}
 
 		// We've sent a syn, listen for a synack and go to Established
@@ -257,7 +245,7 @@ func (peer *Peer) Run() {
 				log.Printf("successfully handshaked with %s\n", peer.name)
 				fmt.Printf("connected to %s\n", peer.name)
 				peer.server.AddPeer(peer)
-				peer.state = Established
+				peer.SetState(Established)
 			}
 
 		// We received a syn, ack it and go to Established
@@ -268,7 +256,7 @@ func (peer *Peer) Run() {
 				log.Printf("successfully handshaked with %s\n", peer.name)
 				fmt.Printf("connected to %s\n", peer.name)
 				peer.server.AddPeer(peer)
-				peer.state = Established
+				peer.SetState(Established)
 				peer.seq += PacketLen(packet)
 			}
 
@@ -284,7 +272,7 @@ func (peer *Peer) Run() {
 						fmt.Printf("%s> %s\n", peer.name, packet.Data)
 					} else if packet.Flag == tcp.Flag_FIN {
 						fmt.Printf("%s is closing the connection\n", peer.name)
-						peer.state = CloseWait
+						peer.SetState(CloseWait)
 					}
 				} else {
 					log.Printf("got packet that has already been acked (%d > %d)", peer.ack, packet.Seq)
@@ -313,10 +301,10 @@ func (peer *Peer) Run() {
 						Seq:  peer.seq,
 					})
 					peer.seq += 1
-					peer.state = FinWait1
+					peer.SetState(FinWait1)
 				}
 			case <-chRecvExited: // If grpc dies
-				peer.state = Closed
+				peer.SetState(Closed)
 			}
 
 		case CloseWait:
@@ -326,7 +314,7 @@ func (peer *Peer) Run() {
 				Seq:  peer.seq,
 			})
 			peer.seq += 1
-			peer.state = LastAck
+			peer.SetState(LastAck)
 
 		case LastAck:
 			ctx, cancel := Timeout()
@@ -334,11 +322,11 @@ func (peer *Peer) Run() {
 			select {
 			case <-ctx.Done():
 				log.Printf("timed out in LAST_ACK, closing connection to %s\n", peer.name)
-				peer.state = Closed
+				peer.SetState(Closed)
 
 			case packet := <-peer.packets:
 				if packet.Flag == tcp.Flag_ACK {
-					peer.state = Closed
+					peer.SetState(Closed)
 				} else {
 					peer.Send(&tcp.Packet{
 						Flag: tcp.Flag_ACK,
@@ -356,20 +344,20 @@ func (peer *Peer) Run() {
 			select {
 			case <-ctx.Done():
 				log.Printf("timed out in FIN_WAIT_1, closing connection to %s\n", peer.name)
-				peer.state = Closed
+				peer.SetState(Closed)
 
 			case packet := <-peer.packets:
 				// State machine has two paths because the other side might try to FIN at the same
 				// time as us or their ack might have been lost.
 				if packet.Flag == tcp.Flag_ACK {
-					peer.state = FinWait2
+					peer.SetState(FinWait2)
 				} else if packet.Flag == tcp.Flag_FIN {
 					peer.Send(&tcp.Packet{
 						Flag: tcp.Flag_ACK,
 						Seq:  peer.seq,
 					})
 					peer.seq += 1
-					peer.state = Closing
+					peer.SetState(Closing)
 				}
 			}
 
@@ -381,7 +369,7 @@ func (peer *Peer) Run() {
 			select {
 			case <-ctx.Done():
 				log.Printf("timed out in FIN_WAIT_2, closing connection to %s\n", peer.name)
-				peer.state = Closed
+				peer.SetState(Closed)
 
 			case packet := <-peer.packets:
 				if packet.Flag == tcp.Flag_FIN {
@@ -390,7 +378,7 @@ func (peer *Peer) Run() {
 						Seq:  peer.seq,
 					})
 					peer.seq += 1
-					peer.state = TimeWait
+					peer.SetState(TimeWait)
 				}
 			}
 
@@ -402,11 +390,11 @@ func (peer *Peer) Run() {
 			select {
 			case <-ctx.Done():
 				log.Printf("timed out in CLOSING, closing connection to %s\n", peer.name)
-				peer.state = Closed
+				peer.SetState(Closed)
 
 			case packet := <-peer.packets:
 				if packet.Flag == tcp.Flag_ACK {
-					peer.state = TimeWait
+					peer.SetState(TimeWait)
 				}
 			}
 
@@ -418,7 +406,7 @@ func (peer *Peer) Run() {
 
 			select {
 			case <-ctx.Done():
-				peer.state = Closed
+				peer.SetState(Closed)
 
 			case packet := <-peer.packets:
 				// We're done, but the other side might never have seen our final ack! If they send
