@@ -1,3 +1,5 @@
+[Link to the github](https://github.com/JonasUJ/dsys-hw2)
+
 # dsys-hw2
 
 (short for: Distributed systems homework 2)
