@@ -52,6 +52,15 @@ func Len(s string) uint32 {
 	return uint32(len(s) + 1)
 }
 
+func PacketLen(packet *tcp.Packet) uint32 {
+	// syn and synack always have + 1 to ack
+	if packet.Flag == tcp.Flag_SYN || packet.Flag == tcp.Flag_SYNACK {
+		return 1
+	} else {
+		return Len(packet.Data)
+	}
+}
+
 type Stream interface {
 	Send(*tcp.Packet) error
 	Recv() (*tcp.Packet, error)
@@ -110,12 +119,24 @@ func (peer *Peer) RetransmitLoop(chExit chan struct{}) {
 		default:
 		}
 
-		now := time.Now().UnixMilli()
-		for _, retransmit := range peer.unacked {
-			if retransmit.when+int64(time.Second) > now {
-				log.Printf("retransmitting %+v to %s", retransmit.packet, peer.name)
-				peer.Send(retransmit.packet)
+		if len(peer.unacked) == 0 {
+			continue
+		}
+
+		// Choose high initial min (unlikely that a packet will have this number)
+		var min uint32 = 1 << 31
+		for k := range peer.unacked {
+			if k < min {
+				min = k
 			}
+		}
+
+		// Retransmit the packet if enough time has passed
+		retransmit := peer.unacked[min]
+		now := time.Now().UnixMilli()
+		if retransmit.when > now {
+			log.Printf("retransmitting lowest unacked packet %+v to %s", retransmit.packet, peer.name)
+			peer.Send(retransmit.packet)
 		}
 	}
 }
@@ -124,22 +145,22 @@ func (peer *Peer) Send(packet *tcp.Packet) {
 	go func() {
 		// Keep track of when packet is acked
 		if packet.Flag != tcp.Flag_ACK {
-			var expected uint32
-
-			// syn and synack always have + 1 to ack
-			if packet.Flag != tcp.Flag_SYN && packet.Flag != tcp.Flag_SYNACK {
-				expected = packet.Seq + Len(packet.Data)
-				peer.seq += Len(packet.Data)
-			} else {
-				expected = packet.Seq + 1
-				peer.seq += 1
-			}
+			length := PacketLen(packet)
+			expected := packet.Seq + length
 
 			log.Printf("expecting ack %d from %s", expected, peer.name)
 
 			peer.mu.Lock()
-			peer.unacked[expected] = Retransmit{time.Now().UnixMilli(), packet}
+			peer.unacked[expected] = Retransmit{
+				time.Now().UnixMilli() + time.Second.Milliseconds()*2,
+				packet,
+			}
 			peer.mu.Unlock()
+
+			if len(peer.unacked) > 1 {
+				log.Printf("there exists unacked packets to %s, withholding %+v for now", peer.name, packet)
+				return
+			}
 		}
 
 		// Chance of packet loss
@@ -165,22 +186,6 @@ func (peer *Peer) Recv(chExit chan struct{}) {
 		}
 
 		log.Printf("received packet %+v from %s\n", packet, peer.name)
-
-		// if packet.Seq > peer.ack &&
-		// 	packet.Flag != tcp.Flag_SYN &&
-		// 	packet.Flag != tcp.Flag_SYNACK &&
-		// 	packet.Flag != tcp.Flag_ACK {
-		// 	// Packet has too high seq number. Maybe we lost a packet? Ask for retransmission.
-		// 	log.Printf("packet seq number is too high (%d > %d), asking %s to retransmit %d", packet.Seq, peer.ack, peer.name, peer.ack)
-		//
-		// 	peer.Send(&tcp.Packet{
-		// 		Flag: tcp.Flag_ACK,
-		// 		Seq:  peer.seq,
-		// 		Ack:  peer.ack,
-		// 	})
-		// 	continue
-		// } else {
-		// }
 
 		if _, ok := peer.unacked[packet.Ack]; ok {
 			// Packet was acked, no longer any need to save for retransmission
@@ -241,6 +246,7 @@ func (peer *Peer) Run() {
 
 			if packet.Flag == tcp.Flag_SYNACK {
 				peer.name = packet.Data
+				peer.seq += PacketLen(packet)
 
 				peer.Send(&tcp.Packet{
 					Flag: tcp.Flag_ACK,
@@ -263,6 +269,7 @@ func (peer *Peer) Run() {
 				fmt.Printf("connected to %s\n", peer.name)
 				peer.server.AddPeer(peer)
 				peer.state = Established
+				peer.seq += PacketLen(packet)
 			}
 
 		// Connection establish, listen for packets and user input
@@ -272,15 +279,19 @@ func (peer *Peer) Run() {
 			case packet := <-peer.packets:
 				if packet.Flag == tcp.Flag_NONE {
 					fmt.Printf("%s> %s\n", peer.name, packet.Data)
+				} else if packet.Flag == tcp.Flag_FIN {
+					// TODO
+				}
 
-					// Ack the packet
+				// Ack the packet
+				if packet.Flag != tcp.Flag_ACK {
 					peer.Send(&tcp.Packet{
 						Flag: tcp.Flag_ACK,
 						Seq:  peer.seq,
-						Ack:  packet.Seq + Len(packet.Data),
+						Ack:  packet.Seq + PacketLen(packet),
 					})
-				} else if packet.Flag == tcp.Flag_FIN {
-					// TODO
+				} else {
+					peer.seq += PacketLen(packet)
 				}
 			case msg := <-peer.msgs:
 				switch msg.msgType {
