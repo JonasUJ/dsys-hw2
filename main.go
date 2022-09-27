@@ -26,13 +26,13 @@ const (
 	SynSent
 	SynRecv
 	Established
-	Closed
+	CloseWait
+	LastAck
+	TimeWait
 	FinWait1
 	FinWait2
 	Closing
-	TimeWait
-	CloseWait
-	LastAck
+	Closed
 )
 
 type MessageType uint8
@@ -59,6 +59,11 @@ func PacketLen(packet *tcp.Packet) uint32 {
 	} else {
 		return Len(packet.Data)
 	}
+}
+
+func Timeout() (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(10 * time.Second)
+	return context.WithDeadline(context.Background(), deadline)
 }
 
 type Stream interface {
@@ -176,7 +181,7 @@ func (peer *Peer) Send(packet *tcp.Packet) {
 		}
 
 		// Chance of packet loss
-		if rand.Intn(3) != 0 {
+		if rand.Intn(4) != 0 {
 			log.Printf("sending packet %+v to %s\n", packet, peer.name)
 
 			// Pretend delay on the wire
@@ -190,13 +195,22 @@ func (peer *Peer) Send(packet *tcp.Packet) {
 	}()
 }
 
-func (peer *Peer) Recv(chExit chan struct{}) {
+func (peer *Peer) Recv(chExit, chExited chan struct{}) {
 	for {
 		packet, err := peer.stream.Recv()
 		if err != nil {
-			log.Printf("Recv lost connection to %s\n", peer.name)
-			chExit <- struct{}{}
+			if peer.state != Closed && peer.state != TimeWait {
+				log.Printf("Recv() lost connection to %s\n", peer.name)
+			}
+			chExited <- struct{}{}
 			return
+		}
+
+		// Exit loop when something on channel
+		select {
+		case <-chExit:
+			return
+		default:
 		}
 
 		log.Printf("received packet %+v from %s\n", packet, peer.name)
@@ -215,10 +229,11 @@ func (peer *Peer) Recv(chExit chan struct{}) {
 }
 
 func (peer *Peer) Run() {
-	chRecv := make(chan struct{})
-	chRetransmit := make(chan struct{})
-	go peer.Recv(chRecv)
-	go peer.RetransmitLoop(chRetransmit)
+	chRecvExit := make(chan struct{}, 1)
+	chRecvExited := make(chan struct{}, 1)
+	chRetransmitExit := make(chan struct{}, 1)
+	go peer.Recv(chRecvExit, chRecvExited)
+	go peer.RetransmitLoop(chRetransmitExit)
 
 	for {
 		// Encodes the TCP State Machine
@@ -297,7 +312,8 @@ func (peer *Peer) Run() {
 					if packet.Flag == tcp.Flag_NONE {
 						fmt.Printf("%s> %s\n", peer.name, packet.Data)
 					} else if packet.Flag == tcp.Flag_FIN {
-						// TODO
+						fmt.Printf("%s is closing the connection\n", peer.name)
+						peer.state = CloseWait
 					}
 				} else {
 					log.Printf("got packet that has already been acked (%d > %d)", peer.ack, packet.Seq)
@@ -320,17 +336,139 @@ func (peer *Peer) Run() {
 						Data: msg.data,
 					})
 					peer.seq += Len(msg.data)
+				case Close:
+					peer.Send(&tcp.Packet{
+						Flag: tcp.Flag_FIN,
+						Seq:  peer.seq,
+					})
+					peer.seq += 1
+					peer.state = FinWait1
 				}
-			case <-chRecv: // If grpc dies
+			case <-chRecvExited: // If grpc dies
 				peer.state = Closed
 			}
+
+		case CloseWait:
+			time.Sleep(time.Second)
+			peer.Send(&tcp.Packet{
+				Flag: tcp.Flag_FIN,
+				Seq:  peer.seq,
+			})
+			peer.seq += 1
+			peer.state = LastAck
+
+		case LastAck:
+			ctx, cancel := Timeout()
+
+			select {
+			case <-ctx.Done():
+				log.Printf("timed out in LAST_ACK, closing connection to %s\n", peer.name)
+				peer.state = Closed
+
+			case packet := <-peer.packets:
+				if packet.Flag == tcp.Flag_ACK {
+					peer.state = Closed
+				} else {
+					peer.Send(&tcp.Packet{
+						Flag: tcp.Flag_ACK,
+						Seq:  peer.seq,
+						Ack:  packet.Seq + PacketLen(packet),
+					})
+				}
+			}
+
+			cancel()
+
+		case FinWait1:
+			ctx, cancel := Timeout()
+
+			select {
+			case <-ctx.Done():
+				log.Printf("timed out in FIN_WAIT_1, closing connection to %s\n", peer.name)
+				peer.state = Closed
+
+			case packet := <-peer.packets:
+				// State machine has two paths because the other side might try to FIN at the same
+				// time as us or their ack might have been lost.
+				if packet.Flag == tcp.Flag_ACK {
+					peer.state = FinWait2
+				} else if packet.Flag == tcp.Flag_FIN {
+					peer.Send(&tcp.Packet{
+						Flag: tcp.Flag_ACK,
+						Seq:  peer.seq,
+					})
+					peer.seq += 1
+					peer.state = Closing
+				}
+			}
+
+			cancel()
+
+		case FinWait2:
+			ctx, cancel := Timeout()
+
+			select {
+			case <-ctx.Done():
+				log.Printf("timed out in FIN_WAIT_2, closing connection to %s\n", peer.name)
+				peer.state = Closed
+
+			case packet := <-peer.packets:
+				if packet.Flag == tcp.Flag_FIN {
+					peer.Send(&tcp.Packet{
+						Flag: tcp.Flag_ACK,
+						Seq:  peer.seq,
+					})
+					peer.seq += 1
+					peer.state = TimeWait
+				}
+			}
+
+			cancel()
+
+		case Closing:
+			ctx, cancel := Timeout()
+
+			select {
+			case <-ctx.Done():
+				log.Printf("timed out in CLOSING, closing connection to %s\n", peer.name)
+				peer.state = Closed
+
+			case packet := <-peer.packets:
+				if packet.Flag == tcp.Flag_ACK {
+					peer.state = TimeWait
+				}
+			}
+
+			cancel()
+
+		case TimeWait:
+			fmt.Printf("waiting for timeout to give %s a chance to finish closing connection\n", peer.name)
+			ctx, cancel := Timeout()
+
+			select {
+			case <-ctx.Done():
+				peer.state = Closed
+
+			case packet := <-peer.packets:
+				// We're done, but the other side might never have seen our final ack! If they send
+				// us something, just ack it. I don't think this is part of tcp, but it makes sense.
+				if packet.Flag != tcp.Flag_ACK {
+					peer.Send(&tcp.Packet{
+						Flag: tcp.Flag_ACK,
+						Seq:  peer.seq,
+						Ack:  packet.Seq + PacketLen(packet),
+					})
+				}
+			}
+
+			cancel()
+
 		case Closed:
-			chRetransmit <- struct{}{}
+			chRecvExit <- struct{}{}
+			chRetransmitExit <- struct{}{}
 			fmt.Printf("connection to %s closed\n", peer.name)
 			peer.server.RemovePeer(peer)
 			return
-		default:
-			panic("unimplemented state")
 		}
 	}
 }
@@ -423,7 +561,15 @@ func main() {
 			Connect(tokens[1], server)
 		case "send":
 			if peer, ok := server.peers[tokens[1]]; ok {
-				peer.msgs <- Message{Send, strings.Join(tokens[2:], " ")}
+				if peer.state == Established {
+					peer.msgs <- Message{Send, strings.Join(tokens[2:], " ")}
+				}
+			} else {
+				fmt.Printf("no connection exist to %s\n", tokens[1])
+			}
+		case "close":
+			if peer, ok := server.peers[tokens[1]]; ok {
+				peer.msgs <- Message{Close, tokens[1]}
 			} else {
 				fmt.Printf("no connection exist to %s\n", tokens[1])
 			}
@@ -438,6 +584,7 @@ func main() {
 			fmt.Println(`available commands:
 connect <port> -> establish connection to another instance running on <port>
 send <peer> <msg> -> send <msg> to connection with name <peer>
+close <peer> -> close the connection to a peer
 peers -> display all connected peers
 exit -> terminate the program
 help -> display this help message`)
