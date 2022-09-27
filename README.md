@@ -1,20 +1,20 @@
 # dsys-hw2
 
-Distributed systems homework 2
+(short for: Distributed systems homework 2)
 
-Apologies to however ends up reviewing this, things got a bit out of hand.
+Apologies to however ends up reviewing this, things got a bit out of hand. We are totally aware that our implementation is excessive, but it was fun to do so anyway :)
 
 ## Run the thing
-Start a process: `go run . -name alice -port 50050`
-Then, start another process: `go run . -name bob -port 50051`
-(Optionally, start a third process: `go run . -name charlie -port 50052`)
-(And so on...)
+- Start a process: `go run . -name alice -port 50050`
+- Then, start another process: `go run . -name bob -port 50051`
+- (Optionally, start a third process: `go run . -name charlie -port 50052`)
+- (And so on...)
 
 It displays a message "type 'help' for a list of commands" when it is ready.
 
 Every process has its own server that can be connected to, so from any of the processes, type the command `connect <port>` where `<port>` is the port of any other process. This will make the two processes perform a TCP 3-way handshake and display a message once complete. Then, if you started more than two processes, you can repeat this with the port of any of the other processes to connect to them as well (on process can have multiple connections).
 
-Once connected, use the `send <peer> <msg>` command to send a message (packet with non-empty data field) to the specified peer. The `<peer>` parameter is the name of a peer you've connected to - use the `peers` command to list all connections with names.
+Once connected, use the `send <peer> <msg>` command to send a message (packet with non-empty data field) to the specified peer. The `<peer>` parameter is the name of a peer you've connected to - use the `peers` command to list all connections with names. When a process attempts to send a message, there is a chance it will be "lost" (i.e. we discard it instead of sending it), if it is sent however, we apply a random delay so that things might arrive out-of-order.
 
 When you're done and want to terminate the connection you can do one of the following:
 - Use the command `exit`. This will kill the process and hence the gRPC stream, which all connected peers will see (not very pretty :c).
@@ -31,7 +31,7 @@ The program accepts a `-logfile` parameter, which is a file where all logs are w
 1. What are packages in your implementation? What data structure do you use to transmit data and meta-data?
 
 We assume that by packages the question means packets.
-Packets in our implementation is a struct, and is defined as a message in [tcp.proto](https://github.com/JonasUJ/dsys-hw2/blob/main/tcp/tcp.proto#L19-L24). It has the following declaration (which protoc transforms into a go struct with the same fields).
+Packets in our implementation is a struct, and is defined as a message in [tcp.proto](https://github.com/JonasUJ/dsys-hw2/blob/main/tcp/tcp.proto#L19-L24). It has the following declaration (which `protoc` transforms into a go struct with the same fields).
 ```cs
 message Packet {
     Flag flag = 1;
