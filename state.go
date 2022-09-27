@@ -1,5 +1,6 @@
 package main
 
+// Enum of TCP states
 type State uint8
 
 const (
