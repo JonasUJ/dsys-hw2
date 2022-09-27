@@ -77,7 +77,7 @@ func NewPeer(stream Stream, state State, server *Server) *Peer {
 	}
 }
 
-func (peer *Peer) Format() string {
+func (peer *Peer) String() string {
 	return fmt.Sprintf("name:%s state:%d seq:%d ack:%d unacked:%d",
 		peer.name,
 		peer.state,

@@ -74,7 +74,7 @@ func main() {
 			}
 		case "peers":
 			for name, peer := range server.peers {
-				fmt.Printf("%s %s\n", name, peer.Format())
+				fmt.Printf("%s %s\n", name, peer)
 			}
 		case "exit":
 			fmt.Println("bye")
